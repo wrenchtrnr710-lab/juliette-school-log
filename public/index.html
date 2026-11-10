@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Juliette's School Log</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:20px auto;padding:0 14px;color:#222;background:#f8f5f0}
+  h1{color:#3d6b52;margin-bottom:4px}
+  .sub{color:#666;margin-bottom:18px}
+  .card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;margin-bottom:16px}
+  label{display:block;margin:6px 0}
+  .row{display:flex;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap}
+  .row .name{width:210px;font-size:17px}
+  .row .cur{color:#666;font-size:13px;width:170px}
+  input[type=number]{width:70px;padding:6px;font-size:16px}
+  input[type=date],input[type=text]{padding:6px;font-size:16px}
+  input[type=text]{width:100%;box-sizing:border-box}
+  input[type=checkbox]{width:22px;height:22px}
+  button{background:#3d6b52;color:#fff;border:0;border-radius:6px;padding:10px 16px;font-size:16px;cursor:pointer;margin-right:8px;margin-top:6px}
+  button.alt{background:#777}
+  button.del{background:#a33;padding:4px 10px;font-size:14px;margin:0}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{border-bottom:1px solid #ddd;padding:6px;text-align:left;vertical-align:top}
+  .big{font-size:28px;color:#3d6b52;font-weight:bold}
+  #msg{color:#3d6b52;margin-left:8px}
+  @media print{.noprint{display:none}body{background:#fff}}
+</style>
+</head>
+<body>
+<h1>Juliette's School Log</h1>
+<div class="sub">Attendance · subjects taught · curriculum used <span id="sync" style="margin-left:10px;font-size:13px"></span></div>
+
+<div class="card">
+  <span class="big" id="days">0</span> days logged of 172 &nbsp;|&nbsp; <span id="mins">0</span> total minutes
+</div>
+
+<div class="card noprint">
+  <label><b>Date</b> <input type="date" id="date"></label>
+  <div id="subjects"></div>
+  <label><b>Notes</b> (optional)<input type="text" id="notes"></label>
+  <button onclick="save()">Save day</button><span id="msg"></span>
+  <div style="font-size:13px;color:#666;margin-top:8px">Saving a date that already exists replaces it. A day counts as a school day if at least one subject is checked.</div>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>Date</th><th>Subjects (minutes)</th><th>Curriculum</th><th>Notes</th><th class="noprint"></th></tr></thead>
+    <tbody id="log"></tbody>
+  </table>
+</div>
+
+<div class="card noprint">
+  <button onclick="exportCSV()">Download CSV</button>
+  <button onclick="window.print()">Print</button>
+  <button class="alt" onclick="backup()">Backup file</button>
+  <button class="alt" onclick="document.getElementById('imp').click()">Restore backup</button>
+  <input type="file" id="imp" accept=".json" style="display:none" onchange="restore(event)">
+  <div style="font-size:13px;color:#666;margin-top:8px">Entries save to the server and show on every device. A copy is also kept in this browser. Use Backup file once a week as an extra copy.</div>
+</div>
+
+
+<script>
+const SUBJECTS=[
+  {n:"Math",c:"Power Homeschool (Acellus)"},
+  {n:"Language Arts / Reading",c:"Power Homeschool (Acellus)"},
+  {n:"Science",c:"Power Homeschool (Acellus)"},
+  {n:"Social Studies",c:"Power Homeschool (Acellus)"},
+  {n:"IXL",c:"IXL"}
+];
+const KEY="juliette-school-log", PKEY="juliette-school-log-pass", API="/api/log";
+let data=[];
+try{data=JSON.parse(localStorage.getItem(KEY)||"[]")}catch(e){data=[]}
+
+function cache(){try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}}
+function today(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")}
+function setSync(t,ok){const e=document.getElementById("sync");e.textContent=t;e.style.color=ok?"#3d6b52":"#a33"}
+function hdrs(){const h={"Content-Type":"application/json"};let p="";try{p=localStorage.getItem(PKEY)||""}catch(e){}if(p)h["x-passcode"]=p;return h}
+
+async function serverGet(){
+  let r=await fetch(API,{headers:hdrs(),cache:"no-store"});
+  if(r.status===401){
+    const p=prompt("Enter the passcode");
+    if(p===null)throw new Error("no passcode");
+    try{localStorage.setItem(PKEY,p)}catch(e){}
+    r=await fetch(API,{headers:hdrs(),cache:"no-store"});
+  }
+  if(!r.ok)throw new Error("server "+r.status);
+  return r.json();
+}
+async function serverPut(arr){
+  const r=await fetch(API,{method:"PUT",headers:hdrs(),body:JSON.stringify(arr)});
+  if(!r.ok)throw new Error("server "+r.status);
+}
+function sortData(){data.sort((a,b)=>a.date<b.date?1:-1)}
+
+async function pull(){
+  try{
+    setSync("Loading…",true);
+    const remote=await serverGet();
+    // merge: keep server entries; add any local-only dates (unsynced)
+    const have=new Set(remote.map(x=>x.date));
+    const localOnly=data.filter(x=>!have.has(x.date)&&x.__pending);
+    data=remote.concat(localOnly);
+    sortData();cache();render();loadDate();
+    setSync("Synced",true);
+  }catch(e){setSync("Offline: showing this device's copy",false);render();loadDate()}
+}
+
+async function save(){
+  const date=document.getElementById("date").value;
+  if(!date){alert("Pick a date");return}
+  const subjects=[];
+  SUBJECTS.forEach((s,i)=>{
+    if(document.getElementById("c"+i).checked)
+      subjects.push({name:s.n,curriculum:s.c,minutes:parseInt(document.getElementById("m"+i).value)||0});
+  });
+  const notes=document.getElementById("notes").value;
+  const entry={date,subjects,notes};
+  try{
+    setSync("Saving…",true);
+    const remote=await serverGet();                 // get latest so other devices are not overwritten
+    let merged=remote.filter(x=>x.date!==date);
+    if(subjects.length||notes)merged.push(entry);
+    merged.sort((a,b)=>a.date<b.date?1:-1);
+    await serverPut(merged);
+    data=merged;cache();render();
+    setSync("Saved and synced",true);
+    flash("Saved");
+  }catch(e){
+    // server unreachable: keep locally, mark pending
+    data=data.filter(x=>x.date!==date);
+    if(subjects.length||notes)data.push(Object.assign({__pending:true},entry));
+    sortData();cache();render();
+    setSync("NOT synced (offline). Press Save day again when online.",false);
+    flash("Saved on this device only");
+  }
+}
+function flash(t){const m=document.getElementById("msg");m.textContent=t;setTimeout(()=>m.textContent="",2500)}
+
+async function del(date){
+  if(!confirm("Delete "+date+"?"))return;
+  try{
+    const remote=await serverGet();
+    const merged=remote.filter(x=>x.date!==date);
+    await serverPut(merged);
+    data=merged;cache();render();loadDate();setSync("Synced",true);
+  }catch(e){alert("Could not reach the server. Try again when online.")}
+}
+
+function buildForm(){
+  document.getElementById("subjects").innerHTML=SUBJECTS.map((s,i)=>
+   `<div class="row"><input type="checkbox" id="c${i}"><span class="name">${s.n}</span><span class="cur">${s.c}</span><input type="number" id="m${i}" min="0" placeholder="min"> min</div>`).join("");
+}
+function loadDate(){
+  const d=document.getElementById("date").value;
+  const e=data.find(x=>x.date===d);
+  SUBJECTS.forEach((s,i)=>{
+    const hit=e&&e.subjects.find(x=>x.name===s.n);
+    document.getElementById("c"+i).checked=!!hit;
+    document.getElementById("m"+i).value=hit&&hit.minutes?hit.minutes:"";
+  });
+  document.getElementById("notes").value=e?e.notes||"":"";
+}
+function render(){
+  const days=data.filter(x=>x.subjects.length).length;
+  const mins=data.reduce((a,x)=>a+x.subjects.reduce((b,s)=>b+s.minutes,0),0);
+  document.getElementById("days").textContent=days;
+  document.getElementById("mins").textContent=mins;
+  document.getElementById("log").innerHTML=data.map(x=>{
+    const subs=x.subjects.map(s=>s.name+(s.minutes?" ("+s.minutes+")":"")).join(", ");
+    const cur=[...new Set(x.subjects.map(s=>s.curriculum))].join(", ");
+    return `<tr><td>${x.date}</td><td>${subs}</td><td>${cur}</td><td>${esc(x.notes||"")}</td><td class="noprint"><button class="del" onclick="del('${x.date}')">Delete</button></td></tr>`;
+  }).join("");
+}
+function esc(s){return s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function dl(name,text,type){
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();
+}
+function exportCSV(){
+  const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
+  const rows=[["Date","Subject","Curriculum","Minutes","Notes"]];
+  [...data].sort((a,b)=>a.date>b.date?1:-1).forEach(x=>{
+    if(!x.subjects.length)rows.push([x.date,"","","",x.notes||""]);
+    x.subjects.forEach(s=>rows.push([x.date,s.name,s.curriculum,s.minutes,x.notes||""]));
+  });
+  dl("juliette-school-log.csv",rows.map(r=>r.map(q).join(",")).join("\n"),"text/csv");
+}
+function backup(){dl("juliette-school-log-backup-"+today()+".json",JSON.stringify(data),"application/json")}
+function restore(ev){
+  const f=ev.target.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=async()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d))throw 0;
+    if(confirm("Replace the current log with this backup?")){await serverPut(d);data=d;cache();render();loadDate();setSync("Restored and synced",true)}}
+    catch(e){alert("Could not restore that file")}};
+  r.readAsText(f);
+}
+buildForm();
+document.getElementById("date").value=today();
+document.getElementById("date").addEventListener("change",loadDate);
+render();loadDate();pull();
+</script>
+</body>
+</html>
